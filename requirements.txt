@@ -1,2 +1,10 @@
+streamlit>=1.50
 pandas>=2.0
 numpy>=1.26
+scipy
+plotly
+requests
+pyarrow
+pyreaddbc
+dbfread
+python-dateutil
