@@ -1,63 +1,57 @@
-"""O calor está mandando mais gente de Heliópolis para o hospital?
+"""Calor e internações: Heliópolis × resto de São Paulo.
 
 Rodar:  streamlit run app.py
 """
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from meteo import clima, config, cruzamento, saude
 
-LARANJA, CINZA, AZUL, CINZA_CLARO = "#eb6834", "#a3a29c", "#2a78d6", "#d9d8d2"
+COR = {"heliopolis": "#eb6834", "resto_sp": "#2a78d6"}       # identidade dos lugares
+CINZA, TINTA = "#a3a29c", "#52514e"
+SEM_BARRA = {"displayModeBar": False}
 
 st.set_page_config(page_title="Calor e internações em Heliópolis", page_icon="🌡️",
                    layout="wide")
 
 
 def f(x, casas=0):
-    return f"{x:.{casas}f}".replace(".", ",")
+    return "–" if pd.isna(x) else f"{x:.{casas}f}".replace(".", ",")
+
+
+def milhar(x):
+    return f"{x:,.0f}".replace(",", ".")
 
 
 def var(x):
-    return "–" if pd.isna(x) else ("+" if x >= 0 else "−") + f(abs(x)) + "%"
+    if pd.isna(x):
+        return "–"
+    if abs(x) < 0.5:
+        return "0%"
+    return ("+" if x > 0 else "−") + f(abs(x)) + "%"
 
 
-def grafico(fig, altura=360):
-    fig.update_layout(height=altura, margin=dict(l=8, r=8, t=16, b=8), showlegend=False,
-                      separators=",.", bargap=.35, hoverlabel=dict(font_size=14))
+def mudou(x):
+    if pd.isna(x) or abs(x) < 0.5:
+        return "ficaram **praticamente iguais**"
+    return f"**{'subiram' if x > 0 else 'caíram'} {f(abs(x))}%**"
+
+
+def estilo_barras(cores, significativos):
+    """Cheia = diferença confiável; vazada (só contorno) = pode ser acaso."""
+    return dict(color=[c if s else "rgba(0,0,0,0)" for c, s in zip(cores, significativos)],
+                line=dict(color=cores, width=2.5))
+
+
+def grafico(fig, altura=380):
+    fig.update_layout(height=altura, margin=dict(l=8, r=8, t=40, b=8), separators=",.",
+                      bargap=.3, bargroupgap=.08, hoverlabel=dict(font_size=14),
+                      legend=dict(orientation="h", y=1.08, x=0, font_size=14, title=None))
     fig.update_xaxes(showgrid=False, tickfont_size=13)
     fig.update_yaxes(tickfont_size=12, gridcolor="rgba(128,128,128,.15)")
     return fig
-
-
-def barras_variacao(rotulos, df, horizontal=False):
-    """Barras de '% acima do normal'. Laranja = aumento confiável; cinza = pode ser acaso."""
-    cores = [LARANJA if s and v > 0 else AZUL if s else CINZA_CLARO
-             for s, v in zip(df["significativo"], df["variacao"].fillna(0))]
-    texto = [var(v) for v in df["variacao"]]
-    dica = [f"{d} dias<br>{f(o, 1)} internações/dia (normal: {f(n, 1)})<br>"
-            f"faixa provável: {var(lo)} a {var(hi)}"
-            for d, o, n, lo, hi in zip(df["dias"], df["obs_dia"], df["normal_dia"],
-                                       df["ic_inf"], df["ic_sup"])]
-    eixo = dict(x=df["variacao"], y=rotulos, orientation="h") if horizontal else \
-        dict(x=rotulos, y=df["variacao"])
-    fig = go.Figure(go.Bar(**eixo, marker=dict(color=cores, line_width=0), text=texto,
-                           textposition="outside", textfont_size=15, cliponaxis=False,
-                           hovertext=dica, hoverinfo="text"))
-    linha = dict(color="#52514e", width=1.5)
-    if horizontal:
-        fig.add_vline(x=0, line=linha)
-        fig.update_xaxes(title="% a mais (ou a menos) que num dia normal", ticksuffix="%")
-    else:
-        fig.add_hline(y=0, line=linha, annotation_text="dia normal",
-                      annotation_position="bottom right", annotation_font_color="#52514e")
-        fig.update_yaxes(title="% a mais que num dia normal", ticksuffix="%")
-    return fig
-
-
-SEM_BARRA = {"displayModeBar": False}
-LEGENDA_CORES = ("🟧 **laranja** = aumento confiável · ⬜ **cinza** = diferença pequena demais "
-                 "para afirmar (pode ser acaso). Passe o mouse para ver os números.")
 
 
 # ------------------------------------------------------------------ dados
@@ -84,184 +78,212 @@ except Exception as e:  # noqa: BLE001
 
 with st.sidebar:
     st.header("Escolhas")
-    recorte = st.radio("Moradores de", list(saude.RECORTES), format_func=saude.RECORTES.get)
     grupo = st.selectbox("Tipo de internação", list(saude.GRUPOS), format_func=saude.GRUPOS.get)
     padrao = [a for a in anos_ok if a not in config.ANOS_PANDEMIA][-3:]
     anos = st.multiselect("Anos", anos_ok, default=padrao,
                           help="Na primeira vez, cada ano leva alguns minutos para baixar "
                                "(15 arquivos do DATASUS). Depois fica salvo.")
+    pop_h = st.number_input(
+        "População de Heliópolis", min_value=10_000, max_value=300_000,
+        value=config.POP_HELIOPOLIS, step=5_000,
+        help="Usada só no gráfico de internações por 100 mil habitantes. "
+             "55.583 = favela de Heliópolis no Censo 2022 (IBGE). A área dos CEPs pode ter "
+             "mais gente: o Observatório De Olho na Quebrada estima até 200 mil.")
+    sem_feriados = st.toggle(
+        "Descontar feriados e fim de ano", value=True,
+        help="Tira da comparação feriados, Carnaval e 24/12–01/01. Nesses dias muita gente "
+             "viaja e os hospitais internam menos; como eles caem no verão, sem descontar o "
+             "calor pareceria diminuir as internações.")
     st.divider()
     st.caption(f"**Heliópolis** = pacientes com CEP começando em "
                f"{', '.join(config.CEPS_HELIOPOLIS)}.  \n"
-               f"**Dia de calor** = máxima ≥ {f(config.DIA_MUITO_QUENTE)} °C, "
-               f"mais os {config.DIAS_DEPOIS} dias seguintes.  \n"
-               "**Clima:** Open-Meteo · **Saúde:** DATASUS/SIH")
+               "**Clima:** Open-Meteo · **Saúde:** DATASUS/SIH (internações de urgência no SUS)")
 
 if not anos:
     st.info("Escolha pelo menos um ano na barra lateral.")
     st.stop()
 
-# Baixa o que falta mostrando o progresso (a 1ª vez é demorada)
-faltando = [m for a in anos for m in saude._meses_do_ano(a)
-            if not (config.CACHE / f"internacoes_{m}.parquet").exists()]
+faltando = sorted({m for a in anos for m in saude._meses_do_ano(a)
+                   if not (config.CACHE / f"internacoes_{m}.parquet").exists()})
 if faltando:
-    barra = st.progress(0.0, "Baixando internações do DATASUS…")
-    for i, m in enumerate(sorted(set(faltando))):
-        barra.progress(i / len(set(faltando)), f"Baixando arquivo {i + 1} de {len(set(faltando))} "
-                                                 f"(20{m[:2]}/{m[2:]})… cada um leva ~1 min")
+    barra = st.progress(0.0)
+    for i, m in enumerate(faltando):
+        barra.progress(i / len(faltando), f"Baixando internações do DATASUS: arquivo {i + 1} de "
+                                          f"{len(faltando)} (20{m[:2]}/{m[2:]}) · ~1 min cada")
         saude.baixar_mes(m)
     barra.empty()
 
 try:
-    r = cruzamento.analisar(dados_clima(), dados_saude(tuple(sorted(anos))), recorte, grupo)
+    r = cruzamento.analisar(dados_clima(), dados_saude(tuple(sorted(anos))), grupo, int(pop_h),
+                            sem_feriados)
 except Exception as e:  # noqa: BLE001
     st.error(f"Erro ao preparar os dados: {e}")
     st.stop()
 
-tab, g = r["tabela"], r["geral"]
-quem = saude.RECORTES[recorte]
-de_quem = {"heliopolis": "de Heliópolis", "resto_sp": "do resto da cidade de SP"}[recorte]
+tab, limiar = r["tabela"], r["limiar"]
 tipo = saude.GRUPOS[grupo].lower()
-c = cruzamento.col(recorte, grupo)
 
 # ------------------------------------------------------------ abertura
-st.title("O calor está mandando mais gente para o hospital?")
+st.title("Calor e internações: Heliópolis × resto de São Paulo")
 st.markdown(
-    f"Contamos as **internações de urgência no SUS** de moradores **{de_quem}** "
-    f"({tipo}) em {', '.join(map(str, sorted(anos)))} e comparamos os **dias de calor** "
-    f"(máxima de {f(config.DIA_MUITO_QUENTE)} °C ou mais) com **dias normais da mesma época "
-    "do ano**.")
-
-k1, k2, k3 = st.columns(3)
-k1.metric("Num dia normal", f"{f(g['normal_dia'], 1)} internações", border=True,
-          help="O esperado para aquele mês e dia da semana")
-k2.metric("Num dia de calor", f"{f(g['obs_dia'], 1)} internações", border=True,
-          help=f"Média dos dias com máxima ≥ {f(config.DIA_MUITO_QUENTE)} °C e dos "
-               f"{config.DIAS_DEPOIS} dias seguintes")
-k3.metric("Diferença", var(g["variacao"]), border=True,
-          delta="confiável" if g["significativo"] else "pode ser acaso",
-          delta_color="inverse" if g["significativo"] else "off",
-          help=f"Faixa provável: {var(g['ic_inf'])} a {var(g['ic_sup'])}")
+    f"Comparamos a **sensação térmica** de cada dia (Open-Meteo) com as **internações de "
+    f"urgência no SUS** ({tipo}) em {', '.join(map(str, sorted(anos)))}. "
+    f"**Dia de calor** = sensação térmica máxima de **{f(limiar, 1)} °C ou mais** "
+    f"(os {100 - config.PERCENTIL_DIA_CALOR}% dias mais quentes do período), contando também os "
+    f"{config.DIAS_DEPOIS} dias seguintes."
+    + (f" Feriados, Carnaval e fim de ano ({r['feriados_removidos']} dias) ficam de fora."
+       if sem_feriados else ""))
 
 with st.container(border=True):
     st.markdown("#### O que os dados mostram")
     for item in r["conclusoes"]:
-        fim = "" if item["titulo"].endswith("?") else "."
-        st.markdown(f"**{item['titulo']}{fim}** {item['texto']}")
+        st.markdown(f"**{item['titulo']}** {item['texto']}")
 
-# ------------------------------------------------- 1. faixas de temperatura
+# ------------------------------------- 1. sensação térmica × internações
 st.divider()
-st.subheader("1. Quanto mais quente o dia, mais internações?")
-st.caption("Só dias de novembro a março, agrupados pela temperatura máxima. Cada barra mostra "
-           "quanto as internações ficaram acima (ou abaixo) de um dia normal.")
+st.header("1. Quanto maior a sensação térmica, mais internações?")
+st.caption("Dias de novembro a março, agrupados pela sensação térmica máxima. Cada barra mostra "
+           "quanto as internações ficaram acima (ou abaixo) do normal para aquela época. "
+           "Comparar em % permite colocar Heliópolis e a cidade no mesmo gráfico.")
+
 fx = r["faixas"]
-st.plotly_chart(grafico(barras_variacao(fx["faixa"] + "<br><sub>" + fx["dias"].astype(str)
-                                        + " dias</sub>", fx)), width="stretch", config=SEM_BARRA)
-st.caption(LEGENDA_CORES)
+fig = go.Figure()
+for rec, nome in saude.RECORTES.items():
+    d = fx[fx["recorte"] == rec]
+    fig.add_bar(
+        x=d["faixa"].astype(str), y=d["variacao"], name=nome,
+        marker=estilo_barras([COR[rec]] * len(d), d["significativo"]),
+        text=[var(v) for v in d["variacao"]], textposition="outside", textfont_size=14,
+        cliponaxis=False,
+        hovertext=[f"{nome} · {fa}<br>{dias} dias<br>{f(o, 1)} internações/dia "
+                   f"(normal {f(n, 1)})<br>faixa provável: {var(lo)} a {var(hi)}"
+                   for fa, dias, o, n, lo, hi in zip(d["faixa"], d["dias"], d["obs_dia"],
+                                                     d["normal_dia"], d["ic_inf"], d["ic_sup"])],
+        hoverinfo="text")
+fig.add_hline(y=0, line=dict(color=TINTA, width=1.5), annotation_text="normal",
+              annotation_position="bottom right", annotation_font_color=TINTA)
+fig.update_yaxes(title="% de internações acima do normal", ticksuffix="%")
+fig.update_xaxes(title="sensação térmica máxima do dia")
+st.plotly_chart(grafico(fig, 420), width="stretch", config=SEM_BARRA)
+dias_faixa = fx.drop_duplicates("faixa")[["faixa", "dias"]]
+st.caption("Barra cheia = diferença confiável · barra vazada = diferença pequena demais para "
+           "afirmar (pode ser acaso). "
+           "Dias em cada faixa: " + " · ".join(f"{a}: {b}" for a, b in dias_faixa.values))
 
-# ------------------------------------------------------------- 2. grupos
+st.markdown("##### Dia a dia: cada ponto é um dia de verão")
+lugar = st.radio("Ver", list(saude.RECORTES), format_func=saude.RECORTES.get, horizontal=True,
+                 index=1, label_visibility="collapsed")
+v = tab[tab["verao"]].dropna(subset=[f"{cruzamento.col(lugar, grupo)}__var"])
+y = v[f"{cruzamento.col(lugar, grupo)}__var"]
+fig = go.Figure(go.Scatter(
+    x=v[cruzamento.VAR], y=y, mode="markers",
+    marker=dict(color=COR[lugar], size=7, opacity=.65, line_width=0),
+    customdata=np.c_[v["data"].dt.strftime("%d/%m/%Y"), v[cruzamento.col(lugar, grupo)]],
+    hovertemplate="%{customdata[0]}<br>sensação %{x:.1f} °C<br>%{customdata[1]} internações "
+                  "(%{y:+.0f}% vs. normal)<extra></extra>"))
+if len(v) > 2:
+    a, b = np.polyfit(v[cruzamento.VAR], y, 1)
+    xs = np.linspace(v[cruzamento.VAR].min(), v[cruzamento.VAR].max(), 30)
+    fig.add_scatter(x=xs, y=a * xs + b, mode="lines", line=dict(color=TINTA, dash="dash", width=2),
+                    hoverinfo="skip")
+fig.add_hline(y=0, line=dict(color=CINZA, width=1))
+fig.update_xaxes(title="sensação térmica máxima do dia (°C)")
+fig.update_yaxes(title="% acima do normal", ticksuffix="%")
+c = r["correlacao"].set_index("recorte").loc[lugar]
+st.plotly_chart(grafico(fig, 380).update_layout(showlegend=False), width="stretch",
+                config=SEM_BARRA)
+st.caption(f"Linha tracejada = tendência. Correlação de Spearman: ρ = {f(c['rho'], 2)} "
+           f"({'significativa' if c['p_valor'] < .05 else 'não significativa'}, {c['dias']} dias). "
+           "ρ vai de −1 a +1; positivo = quanto mais calor, mais internações. Valores perto de "
+           "0,1–0,3 são comuns aqui, porque muita coisa além do calor leva alguém ao hospital.")
+
+# ------------------------------------ 2. Heliópolis × resto em dias de calor
 st.divider()
-st.subheader("2. Que tipo de problema mais aumenta nos dias de calor?")
-st.caption(f"Moradores {de_quem}. Variação nos dias de calor em relação ao normal.")
-gr = r["grupos"].sort_values("variacao")
-st.plotly_chart(grafico(barras_variacao(gr["nome"], gr, horizontal=True), 320),
-                width="stretch", config=SEM_BARRA)
-st.caption("Rins, desidratação e insolação são os efeitos mais diretos do calor no corpo. "
-           + LEGENDA_CORES)
+st.header("2. Nos dias de calor, Heliópolis tem mais internados que o resto de SP?")
+comp = r["comparacao"]
+t, dif = comp["tabela"], comp["diferenca"]
 
-# ------------------------------------------------- 3. Heliópolis × cidade
-st.divider()
-st.subheader("3. Heliópolis sofre mais com o calor que o resto da cidade?")
-st.caption(f"{saude.GRUPOS[grupo]}: variação nos dias de calor em cada lugar.")
-cid = r["cidade"]
-fig = barras_variacao(cid["nome"], cid)
-st.plotly_chart(grafico(fig, 320), width="stretch", config=SEM_BARRA)
-n_h = tab[cruzamento.col("heliopolis", grupo)].mean()
-st.caption(f"Heliópolis tem em média {f(n_h, 1)} internações deste tipo por dia; a cidade, "
-           "milhares. Com poucos casos, a incerteza de Heliópolis é maior. " + LEGENDA_CORES)
+a, b = st.columns(2)
+with a:
+    st.markdown("##### Quanto as internações mudam nos dias de calor")
+    st.caption("Cada lugar comparado com o seu próprio normal. Não depende da população. "
+               "Barra vazada = pode ser acaso.")
+    fig = go.Figure(go.Bar(
+        x=t["lugar"], y=t["variacao"],
+        marker=estilo_barras([COR[x] for x in t["recorte"]], t["significativo"]),
+        text=[var(x) for x in t["variacao"]], textposition="outside", textfont_size=18,
+        cliponaxis=False,
+        hovertext=[f"{lu}<br>{f(o, 1)} internações/dia nos dias de calor<br>normal: {f(n, 1)}"
+                   f"<br>faixa provável: {var(lo)} a {var(hi)}" for lu, o, n, lo, hi in
+                   zip(t["lugar"], t["obs_dia"], t["normal_dia"], t["ic_inf"], t["ic_sup"])],
+        hoverinfo="text"))
+    fig.add_hline(y=0, line=dict(color=TINTA, width=1.5))
+    fig.update_yaxes(title="% acima do normal", ticksuffix="%")
+    st.plotly_chart(grafico(fig, 360).update_layout(showlegend=False), width="stretch",
+                    config=SEM_BARRA)
+with b:
+    st.markdown("##### Internações por 100 mil habitantes, por dia")
+    st.caption(f"Cinza = o normal para aqueles mesmos dias; cor = o que aconteceu nos dias de "
+               f"calor. Proporcional à população (Heliópolis: {milhar(pop_h)} hab.; resto de SP: "
+               f"{milhar(config.POP_SP - pop_h)} hab.).")
+    fig = go.Figure()
+    fig.add_bar(x=t["lugar"], y=t["taxa_normal"], name="normal para a época",
+                marker=dict(color=CINZA, line_width=0),
+                text=[f(x, 1) for x in t["taxa_normal"]], textposition="outside",
+                textfont_size=15, cliponaxis=False,
+                hovertemplate="%{x}<br>normal para esses dias: %{y:.1f} por 100 mil<extra></extra>")
+    fig.add_bar(x=t["lugar"], y=t["taxa_calor"], name="dias de calor",
+                marker=dict(color=[COR[x] for x in t["recorte"]], line_width=0),
+                text=[f(x, 1) for x in t["taxa_calor"]], textposition="outside",
+                textfont_size=15, cliponaxis=False,
+                hovertemplate="%{x}<br>dias de calor: %{y:.1f} por 100 mil<extra></extra>")
+    fig.update_yaxes(title="internações por 100 mil hab. por dia")
+    st.plotly_chart(grafico(fig, 360).update_layout(barmode="group"), width="stretch",
+                    config=SEM_BARRA)
 
-# ------------------------------------------------------- 4. dias depois
-st.divider()
-st.subheader("4. Quanto tempo o efeito do calor dura?")
-st.caption(f"Começando no dia de máxima ≥ {f(config.DIA_MUITO_QUENTE)} °C, como ficam as "
-           "internações nos dias seguintes.")
-dd = r["depois"]
-rot = ["no dia"] + [f"{d} dia{'s' if d > 1 else ''}<br>depois" for d in dd["dias_depois"][1:]]
-st.plotly_chart(grafico(barras_variacao(rot, dd)), width="stretch", config=SEM_BARRA)
-st.caption("Se as barras ficam abaixo de zero depois do pico, parte das internações foi apenas "
-           "antecipada pelo calor. " + LEGENDA_CORES)
+h = t.set_index("recorte").loc["heliopolis"]
+rs = t.set_index("recorte").loc["resto_sp"]
+with st.container(border=True):
+    if pd.isna(dif["vezes"]):
+        st.markdown("Sem dados suficientes para comparar.")
+    else:
+        hv, rv = h["variacao"], rs["variacao"]
+        if not h["significativo"] and not rs["significativo"]:
+            leitura = ("Nos dois lugares a mudança foi pequena demais para descartar o acaso: "
+                       "**não apareceu efeito do calor** nas internações.")
+        elif hv > 0 and rv > 0 and dif["significativo"]:
+            leitura = (f"O aumento em Heliópolis foi **cerca de {f(hv / rv, 1)} vezes** o do resto "
+                       "da cidade, e o teste estatístico indica que **não é acaso**."
+                       if hv > rv else "O aumento em Heliópolis foi **menor** que o do resto da cidade.")
+        elif dif["significativo"]:
+            leitura = "Os dois lugares reagiram de forma diferente, e o teste indica que não é acaso."
+        else:
+            leitura = ("A diferença entre os dois lugares **pode ser acaso**: Heliópolis tem poucas "
+                       "internações por dia, então são precisos mais anos de dados para ter certeza.")
+        st.markdown(f"**Resultado:** nos dias de calor, as internações {mudou(hv)} em Heliópolis "
+                    f"e {mudou(rv)} no resto de SP. {leitura}")
 
-# ------------------------------------------------------- 5. ondas de calor
-st.divider()
-st.subheader("5. O que aconteceu em cada onda de calor")
-ondas = r["ondas"]
-if ondas.empty:
-    st.info("Nenhuma onda de calor nos anos escolhidos.")
-else:
-    st.caption(f"Onda de calor = {config.ONDA_DIAS} ou mais dias seguidos com máxima acima do "
-               "normal para o mês (os 10% mais quentes de 1991–2020).")
-    meses_pt = "jan fev mar abr mai jun jul ago set out nov dez".split()
-    nomes = [f"{w.inicio.day} {meses_pt[w.inicio.month - 1]}/{w.inicio.year} · {w.dias} dias · "
-             f"pico de {f(w.tmax_pico, 1)} °C"
-             for w in ondas.itertuples()]
-    escolha = st.selectbox("Escolha uma onda (começa pela mais quente)", nomes,
-                           index=int(ondas["tmax_pico"].idxmax()))
-    w = ondas.iloc[nomes.index(escolha)]
-    jan = tab[(tab["data"] >= w["inicio"] - pd.Timedelta(days=7)) &
-              (tab["data"] <= w["fim"] + pd.Timedelta(days=7))]
-    na_onda = jan["data"].between(w["inicio"], w["fim"])
-
-    a, b = st.columns(2)
-    with a:
-        st.markdown("**Temperatura máxima de cada dia**")
-        fig = go.Figure(go.Bar(x=jan["data"], y=jan["tmax"],
-                               marker=dict(color=[LARANJA if x else CINZA_CLARO for x in na_onda],
-                                           line_width=0),
-                               text=[f(x, 0) for x in jan["tmax"]], textposition="outside",
-                               hovertemplate="%{x|%d/%m}: %{y:.1f} °C<extra></extra>"))
-        fig.update_yaxes(title="°C", range=[jan["tmax"].min() - 4, jan["tmax"].max() + 3])
-        st.plotly_chart(grafico(fig, 300).update_xaxes(tickformat="%d/%m"), width="stretch", config=SEM_BARRA)
-    with b:
-        st.markdown(f"**Internações por dia ({quem})**")
-        fig = go.Figure()
-        fig.add_bar(x=jan["data"], y=jan[c], marker=dict(color=AZUL, line_width=0),
-                    hovertemplate="%{x|%d/%m}: %{y} internações<extra></extra>")
-        fig.add_scatter(x=jan["data"], y=jan[f"{c}__normal"], mode="lines",
-                        line=dict(color="#52514e", dash="dash", width=2),
-                        hovertemplate="normal: %{y:.1f}<extra></extra>")
-        fig.add_vrect(x0=w["inicio"] - pd.Timedelta(hours=12), x1=w["fim"] + pd.Timedelta(hours=12),
-                      fillcolor=LARANJA, opacity=.12, line_width=0,
-                      annotation_text="onda de calor", annotation_position="top left")
-        fig.update_yaxes(title="internações")
-        st.plotly_chart(grafico(fig, 300).update_xaxes(tickformat="%d/%m"), width="stretch", config=SEM_BARRA)
-    st.caption("Barras laranja = dias da onda. A linha tracejada é o número normal de internações "
-               "para aquele dia. Barras azuis acima da linha = mais internações que o normal.")
-
-    with st.expander("Todas as ondas de calor"):
-        st.dataframe(ondas, hide_index=True, column_config={
-            "inicio": st.column_config.DateColumn("início", format="DD/MM/YYYY"),
-            "fim": st.column_config.DateColumn("fim", format="DD/MM/YYYY"),
-            "tmax_pico": st.column_config.NumberColumn("máxima no pico (°C)", format="%.1f"),
-            "a_mais": st.column_config.NumberColumn("internações a mais", format="%.0f"),
-            "variacao": st.column_config.NumberColumn("variação (%)", format="%+.0f%%")})
+st.caption("A taxa por 100 mil mede quem foi mais internado. Ela também é afetada por quanto "
+           "cada população usa o SUS: em Heliópolis quase todos dependem do SUS, no resto da "
+           "cidade muitos têm plano de saúde. Por isso o gráfico da esquerda, que compara cada "
+           "lugar consigo mesmo, é a comparação mais justa do efeito do calor.")
 
 # ---------------------------------------------------------------- dados
 st.divider()
 with st.expander("Como a comparação é feita e limitações"):
     st.markdown(
+        "- **Sensação térmica** (Open-Meteo): combina temperatura, umidade e vento. É a "
+        "temperatura que o corpo sente.\n"
         "- **Internações de urgência pagas pelo SUS** (DATASUS/SIH). Ficam de fora cirurgias "
         "marcadas e quem usa só plano de saúde.\n"
-        f"- **Heliópolis** = pacientes cujo CEP de residência começa com "
-        f"{', '.join(config.CEPS_HELIOPOLIS)}. Alguns desses CEPs incluem ruas vizinhas.\n"
-        "- **Dia normal** = média de internações por dia naquele mês e ano, ajustada pelo dia da "
-        "semana. Assim o inverno (mais doenças respiratórias) não atrapalha a comparação.\n"
-        "- **Clima** = Open-Meteo, estimativa para a região. Dentro da favela costuma ser mais "
-        "quente, então o efeito real pode ser maior.\n"
-        "- **Laranja/cinza:** usamos um intervalo de 95%. Se ele inclui o zero, a diferença pode "
-        "ser acaso e a barra fica cinza.")
+        f"- **Heliópolis** = CEP de residência começando com {', '.join(config.CEPS_HELIOPOLIS)}.\n"
+        "- **Normal** = média de internações nos dias sem calor daquele mês e ano, ajustada pelo "
+        "dia da semana. Assim o inverno e as segundas-feiras não atrapalham.\n"
+        "- **Faixa provável** = intervalo de 95%. Se inclui o zero, a diferença pode ser acaso.\n"
+        "- O clima é uma estimativa regional; dentro da favela costuma ser mais quente.")
 with st.expander("Baixar os dados"):
-    cols = ["data", "tmax", "tmin", "chuva"] + [x for x in tab.columns if "__" in x and
-                                                 not x.endswith("__normal")]
+    cols = ["data", "tmax", "tmin", cruzamento.VAR, "chuva", "dia_calor"] + \
+           [x for x in tab.columns if x.count("__") == 1]
     st.download_button("Tabela diária clima × internações (.csv)",
                        tab[cols].to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                        "calor_internacoes_diario.csv")

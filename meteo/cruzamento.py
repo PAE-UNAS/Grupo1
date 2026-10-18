@@ -1,28 +1,37 @@
-"""Cruzamento calor × internações.
+"""Cruzamento sensação térmica × internações.
 
-A pergunta: quando faz muito calor, mais gente precisa ser internada às pressas?
+Duas perguntas:
+  1. Quanto maior a sensação térmica, mais internações?
+  2. Nos dias de calor, Heliópolis tem mais internados que o resto de SP?
 
 Como comparar de forma justa
 ----------------------------
 O número de internações muda com o mês (inverno tem mais doenças
-respiratórias) e com o dia da semana. Então, para cada dia, calculamos quantas
-internações seriam NORMAIS para aquele mês e aquele dia da semana:
+respiratórias) e com o dia da semana. Para cada dia calculamos o NORMAL:
 
-    normal = média de internações por dia no mesmo mês do mesmo ano
-             × peso do dia da semana (ex.: segunda costuma ter mais)
+    normal = média de internações nos dias SEM calor do mesmo mês e ano
+             × peso do dia da semana
 
-E comparamos com o que aconteceu: "+15%" quer dizer 15% acima do normal.
+e comparamos com o que aconteceu ("+15%" = 15% acima do normal).
+
+Heliópolis tem ~50 vezes menos gente que o resto da cidade, então contar
+internados não serve para comparar os dois. Usamos:
+  - o AUMENTO de cada lugar em relação ao seu próprio normal (não depende
+    da população);
+  - a TAXA por 100 mil habitantes (depende da população informada).
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from meteo import config
 from meteo.saude import GRUPOS, RECORTES
 
-FAIXAS_TEMP = [-np.inf, 26, 28, 30, 32, 34, np.inf]
-NOMES_FAIXAS = ["até 26 °C", "26–28 °C", "28–30 °C", "30–32 °C", "32–34 °C", "34 °C ou mais"]
+VAR = "sensacao_max"
+FAIXAS = [-np.inf, 27, 30, 33, 36, np.inf]
+NOMES_FAIXAS = ["até 27 °C", "27–30 °C", "30–33 °C", "33–36 °C", "36 °C ou mais"]
 
 
 def col(recorte: str, grupo: str) -> str:
@@ -30,118 +39,150 @@ def col(recorte: str, grupo: str) -> str:
 
 
 # --------------------------------------------------------------- base diária
-def montar_tabela(clima: pd.DataFrame, internacoes: pd.DataFrame) -> pd.DataFrame:
-    """Junta clima e internações por dia e calcula o 'normal' de cada série."""
-    tab = internacoes.merge(clima, on="data", how="inner").dropna(subset=["tmax"])
-    tab = tab.sort_values("data").reset_index(drop=True)
-    tab["muito_quente"] = tab["tmax"] >= config.DIA_MUITO_QUENTE
-    tab["verao"] = tab["data"].dt.month.isin(config.MESES_QUENTES)
-    # O "normal" é calculado só com dias SEM calor; senão os próprios dias
-    # quentes inflariam a média do mês e esconderiam o efeito.
-    sem_calor = ~dias_de_calor(tab)
-    ano_mes = [tab["data"].dt.year, tab["data"].dt.month]
-    dia_semana = tab["data"].dt.dayofweek
-    for recorte in RECORTES:
-        for grupo in GRUPOS:
-            c = col(recorte, grupo)
-            media_mes = tab[c].where(sem_calor).groupby(ano_mes).transform("mean")
-            media_mes = media_mes.fillna(tab.groupby(ano_mes)[c].transform("mean"))
-            peso_semana = (tab.groupby(dia_semana)[c].transform("mean") / tab[c].mean()
-                           if tab[c].mean() > 0 else 1.0)
-            tab[f"{c}__normal"] = media_mes * peso_semana
-    return tab
-
-
-def comparar(obs: pd.Series, normal: pd.Series) -> dict:
-    """Observado × normal, com intervalo de 95% (aproximação de Poisson)."""
-    o, n = float(obs.sum()), float(normal.sum())
-    if n <= 0 or o <= 0:
-        return {"dias": len(obs), "obs_dia": o / max(len(obs), 1),
-                "normal_dia": n / max(len(obs), 1), "variacao": np.nan,
-                "ic_inf": np.nan, "ic_sup": np.nan, "significativo": False}
-    razao, erro = o / n, 1.96 / np.sqrt(o)
-    lo, hi = razao * np.exp(-erro), razao * np.exp(erro)
-    return {"dias": len(obs), "obs_dia": o / len(obs), "normal_dia": n / len(obs),
-            "variacao": 100 * (razao - 1), "ic_inf": 100 * (lo - 1), "ic_sup": 100 * (hi - 1),
-            "significativo": not (lo <= 1 <= hi)}
+def limiar_calor(tab: pd.DataFrame) -> float:
+    return float(np.nanpercentile(tab[VAR], config.PERCENTIL_DIA_CALOR))
 
 
 def dias_de_calor(tab: pd.DataFrame) -> pd.Series:
-    """Dias muito quentes E os DIAS_DEPOIS dias seguintes (sem contar repetido)."""
-    marca = tab["muito_quente"].copy()
+    """Dias de calor E os DIAS_DEPOIS dias seguintes (o efeito demora um pouco)."""
+    marca = tab["dia_calor"].copy()
     for d in range(1, config.DIAS_DEPOIS + 1):
-        marca |= tab["muito_quente"].shift(d, fill_value=False)
+        marca |= tab["dia_calor"].shift(d, fill_value=False)
     return marca
 
 
-# ------------------------------------------------------------------ análises
-def por_faixa_de_temperatura(tab: pd.DataFrame, recorte: str, grupo: str) -> pd.DataFrame:
-    """Só novembro a março: internações vs. normal em cada faixa de máxima."""
+def feriados(datas: pd.Series) -> pd.Series:
+    """True em feriados, Carnaval e no período de Natal/Ano Novo.
+
+    Nesses dias muita gente viaja e os hospitais internam menos. Como os dias
+    mais quentes do ano caem justamente nessa época, sem descontar os feriados
+    o calor pareceria DIMINUIR as internações.
+    """
+    from dateutil.easter import easter
+
+    fixos = {(1, 1), (1, 25), (4, 21), (5, 1), (7, 9), (9, 7), (10, 12), (11, 2),
+             (11, 15), (11, 20), (12, 25)}           # nacionais + SP (25/01 e 09/07)
+    marca = pd.Series([(d.month, d.day) in fixos for d in datas], index=datas.index)
+    marca |= (datas.dt.month == 12) & (datas.dt.day >= 24)          # Natal → Ano Novo
+    marca |= (datas.dt.month == 1) & (datas.dt.day <= 1)
+    for ano in datas.dt.year.unique():
+        pascoa = pd.Timestamp(easter(int(ano)))
+        moveis = list(pd.date_range(pascoa - pd.Timedelta(days=50),    # sábado de Carnaval
+                                    pascoa - pd.Timedelta(days=46)))   # quarta de Cinzas
+        moveis += [pascoa - pd.Timedelta(days=2), pascoa + pd.Timedelta(days=60)]  # Sexta Santa, Corpus Christi
+        marca |= datas.isin(moveis)
+    return marca
+
+
+def montar_tabela(clima: pd.DataFrame, internacoes: pd.DataFrame,
+                  descontar_feriados: bool = True) -> pd.DataFrame:
+    tab = internacoes.merge(clima, on="data", how="inner").dropna(subset=[VAR])
+    tab = tab.sort_values("data").reset_index(drop=True)
+    tab["dia_calor"] = tab[VAR] >= limiar_calor(tab)
+    tab["janela_calor"] = dias_de_calor(tab)
+    tab["verao"] = tab["data"].dt.month.isin(config.MESES_QUENTES)
+    tab["feriado"] = feriados(tab["data"]) if descontar_feriados else False
+
+    # "Normal" = dias comuns: sem calor e (se pedido) sem feriado
+    comum = ~tab["janela_calor"] & ~tab["feriado"]
+    util = ~tab["feriado"]
+    ano_mes = [tab["data"].dt.year, tab["data"].dt.month]
+    semana = tab["data"].dt.dayofweek
+    for r in RECORTES:
+        for g in GRUPOS:
+            c = col(r, g)
+            media = tab[c].where(comum).groupby(ano_mes).transform("mean")
+            ref = tab[c].where(comum).groupby(ano_mes).transform("sum")
+            media = media.fillna(tab[c].where(util).groupby(ano_mes).transform("mean"))
+            # casos usados para estimar o normal do mês (mede a incerteza do normal)
+            tab[f"{c}__ref"] = ref.where(ref > 0, tab[c].where(util).groupby(ano_mes).transform("sum"))
+            base = tab[c].where(util)
+            peso = (base.groupby(semana).transform("mean") / base.mean()) if base.mean() else 1
+            tab[f"{c}__normal"] = media * peso
+            tab[f"{c}__var"] = 100 * (tab[c] / tab[f"{c}__normal"].where(tab[f"{c}__normal"] > 0) - 1)
+    return tab
+
+
+def _incerteza_normal(bloco: pd.DataFrame, c: str) -> float:
+    """Variância relativa da soma dos 'normais' do bloco.
+
+    O normal de um mês é uma média estimada com C casos, então tem erro
+    relativo ~ 1/C. Dias do mesmo mês compartilham o mesmo erro.
+    """
+    mes = [bloco["data"].dt.year, bloco["data"].dt.month]
+    soma_mes = bloco.groupby(mes)[f"{c}__normal"].sum()
+    casos = bloco.groupby(mes)[f"{c}__ref"].first()
+    total = soma_mes.sum()
+    return float((soma_mes ** 2 / casos.clip(lower=1)).sum() / total ** 2) if total > 0 else np.nan
+
+
+def comparar(bloco: pd.DataFrame, c: str) -> dict:
+    """Observado × normal nos dias do bloco, com intervalo de 95%.
+
+    O intervalo considera a variação natural dos casos (Poisson) E a incerteza
+    do próprio normal, que é grande quando há poucos casos (Heliópolis).
+    """
+    o, n, dias = float(bloco[c].sum()), float(bloco[f"{c}__normal"].sum()), len(bloco)
+    base = {"dias": dias, "obs": o, "normal": n, "obs_dia": o / max(dias, 1),
+            "normal_dia": n / max(dias, 1), "var_log": np.nan}
+    if n <= 0 or o <= 0:
+        return base | {"variacao": np.nan, "ic_inf": np.nan, "ic_sup": np.nan,
+                       "significativo": False}
+    var_log = 1 / o + _incerteza_normal(bloco, c)
+    razao, erro = o / n, 1.96 * np.sqrt(var_log)
+    lo, hi = razao * np.exp(-erro), razao * np.exp(erro)
+    return base | {"var_log": var_log, "variacao": 100 * (razao - 1), "ic_inf": 100 * (lo - 1),
+                   "ic_sup": 100 * (hi - 1), "significativo": not (lo <= 1 <= hi)}
+
+
+# ------------------------------------- 1. sensação térmica × internações
+def por_faixa(tab: pd.DataFrame, grupo: str) -> pd.DataFrame:
+    """Novembro a março, por faixa de sensação térmica, nos dois lugares."""
     v = tab[tab["verao"]]
-    faixa = pd.cut(v["tmax"], FAIXAS_TEMP, labels=NOMES_FAIXAS, right=False)
-    c = col(recorte, grupo)
-    linhas = [{"faixa": nome, **comparar(bloco[c], bloco[f"{c}__normal"])}
-              for nome, bloco in v.groupby(faixa, observed=True)]
-    return pd.DataFrame(linhas)
-
-
-def por_grupo(tab: pd.DataFrame, recorte: str) -> pd.DataFrame:
-    calor = dias_de_calor(tab)
-    linhas = [{"grupo": g, "nome": nome,
-               **comparar(tab.loc[calor, col(recorte, g)], tab.loc[calor, f"{col(recorte, g)}__normal"])}
-              for g, nome in GRUPOS.items()]
-    return pd.DataFrame(linhas)
-
-
-def heliopolis_x_cidade(tab: pd.DataFrame, grupo: str) -> pd.DataFrame:
-    calor = dias_de_calor(tab)
-    c = lambda r: col(r, grupo)  # noqa: E731
-    return pd.DataFrame([{"recorte": r, "nome": nome,
-                          **comparar(tab.loc[calor, c(r)], tab.loc[calor, f"{c(r)}__normal"])}
-                         for r, nome in RECORTES.items()])
-
-
-def dias_depois(tab: pd.DataFrame, recorte: str, grupo: str, maximo: int = 7) -> pd.DataFrame:
-    """Para cada dia muito quente, olha o próprio dia e os dias seguintes."""
-    c = col(recorte, grupo)
-    quentes = np.flatnonzero(tab["muito_quente"].to_numpy())
+    faixa = pd.cut(v[VAR], FAIXAS, labels=NOMES_FAIXAS, right=False)
     linhas = []
-    for d in range(maximo + 1):
-        idx = quentes + d
-        idx = idx[idx < len(tab)]
-        linhas.append({"dias_depois": d,
-                       **comparar(tab[c].iloc[idx], tab[f"{c}__normal"].iloc[idx])})
+    for nome, bloco in v.groupby(faixa, observed=True):
+        for r, rotulo in RECORTES.items():
+            c = col(r, grupo)
+            linhas.append({"faixa": nome, "recorte": r, "lugar": rotulo, **comparar(bloco, c)})
     return pd.DataFrame(linhas)
 
 
-def limiares_mensais(clima: pd.DataFrame) -> pd.Series:
-    """P90 da máxima de cada mês em 1991–2020: o 'quente demais' para o mês."""
-    ref = clima[clima["ano"].between(*config.CLIMATOLOGIA)]
-    return ref.groupby("mes")["tmax"].quantile(config.ONDA_PERCENTIL / 100)
+def correlacao(tab: pd.DataFrame, grupo: str) -> pd.DataFrame:
+    """Spearman: sensação térmica do dia × % de internações acima do normal (verão)."""
+    v = tab[tab["verao"]]
+    linhas = []
+    for r, rotulo in RECORTES.items():
+        d = v[[VAR, f"{col(r, grupo)}__var"]].dropna()
+        rho, p = stats.spearmanr(d[VAR], d[f"{col(r, grupo)}__var"])
+        linhas.append({"recorte": r, "lugar": rotulo, "rho": rho, "p_valor": p, "dias": len(d)})
+    return pd.DataFrame(linhas)
 
 
-def ondas_de_calor(tab: pd.DataFrame, limiares: pd.Series, recorte: str,
-                   grupo: str) -> pd.DataFrame:
-    """Ondas (3+ dias acima do P90 do mês) e as internações a mais em cada uma."""
-    t = tab.sort_values("data").reset_index(drop=True)
-    quente = t["tmax"] > t["data"].dt.month.map(limiares)
-    quebra = (~quente) | (t["data"].diff() != pd.Timedelta(days=1))
-    seq = quebra.cumsum()
-    c = col(recorte, grupo)
-    eventos = []
-    for _, bloco in t[quente].groupby(seq[quente]):
-        if len(bloco) < config.ONDA_DIAS:
-            continue
-        i0, i1 = bloco.index[0], min(bloco.index[-1] + config.DIAS_DEPOIS, len(t) - 1)
-        r = comparar(t.loc[i0:i1, c], t.loc[i0:i1, f"{c}__normal"])
-        eventos.append({"inicio": bloco["data"].iat[0], "fim": bloco["data"].iat[-1],
-                        "dias": len(bloco), "tmax_pico": bloco["tmax"].max(),
-                        "internacoes": int(t.loc[i0:i1, c].sum()),
-                        "normal": round(t.loc[i0:i1, f"{c}__normal"].sum(), 1),
-                        "a_mais": round(t.loc[i0:i1, c].sum() - t.loc[i0:i1, f"{c}__normal"].sum(), 1),
-                        "variacao": r["variacao"]})
-    return pd.DataFrame(eventos, columns=["inicio", "fim", "dias", "tmax_pico", "internacoes",
-                                          "normal", "a_mais", "variacao"])
+# ------------------------------------ 2. Heliópolis × resto em dias de calor
+def heliopolis_x_resto(tab: pd.DataFrame, grupo: str, pop_heliopolis: int) -> dict:
+    j = tab["janela_calor"]
+    pops = {"heliopolis": pop_heliopolis, "resto_sp": config.POP_SP - pop_heliopolis}
+    linhas = []
+    for r, rotulo in RECORTES.items():
+        c = col(r, grupo)
+        res = comparar(tab.loc[j], c)
+        fator = 100_000 / pops[r]
+        linhas.append({"recorte": r, "lugar": rotulo, **res,
+                       "taxa_normal": res["normal_dia"] * fator,
+                       "taxa_calor": res["obs_dia"] * fator})
+    df = pd.DataFrame(linhas).set_index("recorte")
+
+    # O aumento de Heliópolis é maior que o do resto? (razão entre as duas razões)
+    h, rs = df.loc["heliopolis"], df.loc["resto_sp"]
+    if min(h["obs"], rs["obs"], h["normal"], rs["normal"]) > 0:
+        rr = (h["obs"] / h["normal"]) / (rs["obs"] / rs["normal"])
+        erro = 1.96 * np.sqrt(h["var_log"] + rs["var_log"])
+        dif = {"vezes": rr, "ic_inf": rr * np.exp(-erro), "ic_sup": rr * np.exp(erro)}
+        dif["significativo"] = not (dif["ic_inf"] <= 1 <= dif["ic_sup"])
+    else:
+        dif = {"vezes": np.nan, "ic_inf": np.nan, "ic_sup": np.nan, "significativo": False}
+    return {"tabela": df.reset_index(), "diferenca": dif}
 
 
 # ----------------------------------------------------------------- conclusões
@@ -150,78 +191,106 @@ def _f(x: float, casas: int = 0) -> str:
 
 
 def _var(x: float) -> str:
-    return ("+" if x >= 0 else "−") + _f(abs(x)) + "%"
+    if pd.isna(x):
+        return "–"
+    if abs(x) < 0.5:
+        return "0%"
+    return ("+" if x > 0 else "−") + _f(abs(x)) + "%"
 
 
-def gerar_conclusoes(tab: pd.DataFrame, recorte: str, grupo: str, geral: dict,
-                     grupos: pd.DataFrame, cidade: pd.DataFrame, depois: pd.DataFrame,
-                     ondas: pd.DataFrame) -> list[dict]:
-    lugar = "moradores de Heliópolis" if recorte == "heliopolis" else "moradores do resto da cidade"
-    n_quentes = int(tab["muito_quente"].sum())
-    out = []
+def _mudou(x: float) -> str:
+    """'subiram 12%' / 'caíram 5%' / 'ficaram iguais'."""
+    if pd.isna(x) or abs(x) < 0.5:
+        return "ficaram praticamente iguais"
+    return f"{'subiram' if x > 0 else 'caíram'} {_f(abs(x))}%"
 
-    if n_quentes == 0:
-        return [{"titulo": "Sem dias muito quentes",
-                 "texto": f"Nenhum dia passou de {_f(config.DIA_MUITO_QUENTE)} °C nos anos escolhidos."}]
 
+def gerar_conclusoes(tab, grupo, faixas, corr, comp) -> list[dict]:
+    out, nome = [], GRUPOS[grupo].lower()
+    limiar = tab.loc[tab["dia_calor"], VAR].min() if tab["dia_calor"].any() else np.nan
+    c = corr.set_index("recorte")
+    sem_efeito = True
+
+    # 1. Mais calor, mais internações?
+    rs = faixas[faixas["recorte"] == "resto_sp"].reset_index(drop=True)
+    hl = faixas[faixas["recorte"] == "heliopolis"].reset_index(drop=True)
+    if len(rs) >= 2:
+        cr = c.loc["resto_sp"]
+        topo = rs.iloc[-1]
+        if cr["p_valor"] < .05 and cr["rho"] > 0 and topo["significativo"] and topo["variacao"] > 0:
+            resposta, sem_efeito = "Sim.", False
+        elif cr["p_valor"] < .05 and cr["rho"] < 0:
+            resposta = "Não. Nos dias mais quentes houve até um pouco MENOS internações."
+        else:
+            resposta = "Com estes dados, não apareceu aumento."
+        out.append({
+            "titulo": "Mais calor, mais internações?",
+            "texto": (f"{resposta} No verão, nos dias com sensação térmica {topo['faixa']}, as "
+                      f"internações ({nome}) {_mudou(topo['variacao'])} em relação ao normal no resto "
+                      f"da cidade e {_mudou(hl['variacao'].iloc[-1])} em Heliópolis. Correlação entre "
+                      f"sensação térmica e internações: ρ = {_f(cr['rho'], 2)} no resto de SP e "
+                      f"ρ = {_f(c.loc['heliopolis', 'rho'], 2)} em Heliópolis "
+                      "(0 = nenhuma relação; 1 = relação perfeita)."),
+        })
+
+    # 2. Heliópolis × resto
+    t = comp["tabela"].set_index("recorte")
+    h, r = t.loc["heliopolis"], t.loc["resto_sp"]
+    dif = comp["diferenca"]
+    if not pd.isna(dif["vezes"]):
+        if not h["significativo"] and not r["significativo"]:
+            veredito = ("Nos dois lugares a mudança foi pequena demais para descartar o acaso, "
+                        "então não dá para dizer que Heliópolis é mais afetada.")
+        elif dif["significativo"]:
+            veredito = ("A mudança em Heliópolis foi maior que no resto da cidade."
+                        if dif["vezes"] > 1 else
+                        "A mudança em Heliópolis foi menor que no resto da cidade.")
+        else:
+            veredito = ("A diferença entre os dois lugares pode ser acaso (Heliópolis tem poucos "
+                        "casos por dia).")
+        out.append({
+            "titulo": "Heliópolis é mais afetada nos dias de calor?",
+            "texto": (f"Nos dias de calor (sensação térmica ≥ {_f(limiar, 1)} °C) e nos "
+                      f"{config.DIAS_DEPOIS} seguintes, as internações {_mudou(h['variacao'])} em "
+                      f"Heliópolis e {_mudou(r['variacao'])} no resto de SP. {veredito}"),
+        })
+
+    # 3. Taxa por 100 mil
     out.append({
-        "titulo": "A resposta curta",
-        "texto": (f"Em {n_quentes} dias a máxima passou de {_f(config.DIA_MUITO_QUENTE)} °C. "
-                  f"Nesses dias e nos {config.DIAS_DEPOIS} seguintes, os {lugar} tiveram em média "
-                  f"{_f(geral['obs_dia'], 1)} internações de urgência por dia, contra "
-                  f"{_f(geral['normal_dia'], 1)} num dia normal da mesma época: "
-                  f"**{_var(geral['variacao'])}**. "
-                  + ("A diferença é grande demais para ser acaso." if geral["significativo"] else
-                     "Com a quantidade de dados disponível, essa diferença ainda pode ser acaso.")),
+        "titulo": "Proporcionalmente, quem tem mais internados?",
+        "texto": (f"Heliópolis tem {_f(h['taxa_normal'], 1)} internações de urgência por 100 mil "
+                  f"habitantes num dia normal e {_f(h['taxa_calor'], 1)} nos dias de calor; o resto "
+                  f"da cidade, {_f(r['taxa_normal'], 1)} e {_f(r['taxa_calor'], 1)}. "
+                  + ("Heliópolis interna mais, com ou sem calor. " if h["taxa_normal"] > r["taxa_normal"]
+                     else "")
+                  + "Parte disso é porque quase todos em Heliópolis dependem do SUS, e o número "
+                    "depende da população usada (ajustável na barra lateral)."),
     })
 
-    sig = grupos[grupos["significativo"] & (grupos["grupo"] != "todas")]
-    if len(sig):
-        pior = sig.loc[sig["variacao"].idxmax()]
-        out.append({"titulo": "O que mais aumenta",
-                    "texto": f"O maior aumento foi em “{pior['nome'].lower()}”: "
-                             f"{_var(pior['variacao'])} nos dias de calor."})
-
-    h = cidade.set_index("recorte")
-    if h["variacao"].notna().all():
-        dif = h.loc["heliopolis", "variacao"] - h.loc["resto_sp", "variacao"]
-        out.append({"titulo": "Heliópolis sente mais?",
-                    "texto": f"Nos dias de calor, as internações subiram {_var(h.loc['heliopolis', 'variacao'])} "
-                             f"em Heliópolis e {_var(h.loc['resto_sp', 'variacao'])} no resto da cidade. "
-                             + ("Heliópolis foi mais afetada." if dif > 0 else
-                                "Heliópolis não foi mais afetada que a média da cidade.")
-                             + (" Mas a diferença entre os dois pode ser acaso: Heliópolis tem poucos "
-                                "casos por dia." if h.loc["heliopolis", "ic_inf"] < h.loc["resto_sp", "variacao"]
-                                < h.loc["heliopolis", "ic_sup"] else "")})
-
-    pico = depois.loc[depois["variacao"].idxmax()]
-    dia = int(pico["dias_depois"])
-    quando = ("no próprio dia de calor" if dia == 0 else "no dia seguinte ao calor" if dia == 1
-              else f"{dia} dias depois do calor")
-    out.append({"titulo": "Quando o efeito aparece",
-                "texto": f"O pico de internações acontece {quando} ({_var(pico['variacao'])}). "
-                         "O efeito é rápido: o alerta precisa sair antes ou no começo da onda de calor."})
-
-    if len(ondas):
-        out.append({"titulo": "Ondas de calor",
-                    "texto": f"Houve {len(ondas)} ondas de calor. Somando todas, foram cerca de "
-                             f"{_f(ondas['a_mais'].sum())} internações a mais do que o normal "
-                             f"entre {lugar}."})
+    # 4. Se o calor não apareceu, explicar por quê
+    if sem_efeito:
+        out.append({
+            "titulo": "Por que o calor pode não aparecer nas internações?",
+            "texto": ("Quem passa mal com o calor costuma ser atendido no pronto-socorro e liberado, "
+                      "sem internar (e o SIH só registra internações). O número de internações também "
+                      "depende de haver leito vago. Estudos em São Paulo encontram o efeito do calor "
+                      "mais claramente nas MORTES. Um próximo passo é olhar as mortes no hospital e "
+                      "os óbitos do SIM."),
+        })
     return out
 
 
 # -------------------------------------------------------------------- tudo
-def analisar(clima: pd.DataFrame, internacoes: pd.DataFrame, recorte: str, grupo: str) -> dict:
-    tab = montar_tabela(clima, internacoes)
-    c = col(recorte, grupo)
-    calor = dias_de_calor(tab)
-    geral = comparar(tab.loc[calor, c], tab.loc[calor, f"{c}__normal"])
-    grupos = por_grupo(tab, recorte)
-    cidade = heliopolis_x_cidade(tab, grupo)
-    depois = dias_depois(tab, recorte, grupo)
-    ondas = ondas_de_calor(tab, limiares_mensais(clima), recorte, grupo)
-    return {
-        "tabela": tab, "geral": geral, "faixas": por_faixa_de_temperatura(tab, recorte, grupo),
-        "grupos": grupos, "cidade": cidade, "depois": depois, "ondas": ondas,
-        "conclusoes": gerar_conclusoes(tab, recorte, grupo, geral, grupos, cidade, depois, ondas),
-    }
+def analisar(clima: pd.DataFrame, internacoes: pd.DataFrame, grupo: str,
+             pop_heliopolis: int = config.POP_HELIOPOLIS,
+             descontar_feriados: bool = True) -> dict:
+    completa = montar_tabela(clima, internacoes, descontar_feriados)
+    tab = completa[~completa["feriado"]].reset_index(drop=True)   # análises só em dias comuns
+    faixas = por_faixa(tab, grupo)
+    corr = correlacao(tab, grupo)
+    comp = heliopolis_x_resto(tab, grupo, pop_heliopolis)
+    return {"tabela": tab, "completa": completa, "limiar": limiar_calor(completa),
+            "feriados_removidos": int(completa["feriado"].sum()),
+            "calor_em_feriado": int((completa["janela_calor"] & completa["feriado"]).sum()),
+            "faixas": faixas, "correlacao": corr, "comparacao": comp,
+            "conclusoes": gerar_conclusoes(tab, grupo, faixas, corr, comp)}
