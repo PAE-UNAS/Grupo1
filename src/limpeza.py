@@ -1,3 +1,4 @@
+"""Limpeza da base horária: timestamps, unidades, outliers, lacunas e duplicatas."""
 import numpy as np
 import pandas as pd
 
