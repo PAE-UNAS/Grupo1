@@ -47,12 +47,7 @@ GRUPOS = {
     "idosos": "Pessoas com 65 anos ou mais",
     "criancas": "Crianças de 0 a 9 anos",
     "obitos": "Internações que terminaram em morte",
-    # Arboviroses respondem à temperatura MÉDIA e à chuva com semanas de atraso
-    # (ciclo do mosquito), não ao dia quente. Por isso têm análise mensal própria
-    # (cruzamento.arboviroses_mensal) e não aparecem no seletor de grupos do app.
-    "arboviroses": "Dengue, chikungunya e zika (arboviroses)",
 }
-GRUPOS_DIARIOS = [g for g in GRUPOS if g != "arboviroses"]
 RECORTES = config.RECORTES
 
 
@@ -151,7 +146,6 @@ def tratar(df: pd.DataFrame) -> pd.DataFrame:
     df["idosos"] = df["idade"] >= 65
     df["criancas"] = df["idade"] <= 9
     df["obitos"] = pd.to_numeric(df["MORTE"], errors="coerce") == 1
-    df["arboviroses"] = cid.str.match(r"^A9[0-2]")    # A90 dengue, A91 dengue grave, A92 chikungunya/zika
     return df.dropna(subset=["data"])
 
 

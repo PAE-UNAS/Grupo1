@@ -212,40 +212,6 @@ def defasagem(tab: pd.DataFrame, grupo: str) -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
-# ------------------------------------ arboviroses × temperatura do mês
-def arboviroses_mensal(clima: pd.DataFrame, internacoes: pd.DataFrame,
-                       recorte: str = "cidade", max_meses: int = 2) -> dict:
-    """Internações por arboviroses por mês × temperatura média e chuva de 0 a 2 meses antes.
-
-    O mosquito Aedes se reproduz mais rápido com calor e água parada, e a
-    doença aparece semanas depois. Por isso comparamos cada mês com o clima do
-    próprio mês e dos meses anteriores (Spearman). Só casos graves internam,
-    então isto mostra a ponta do problema; as notificações (SINAN) teriam mais casos.
-    """
-    c = clima.dropna(subset=["tmedia"]).set_index("data")
-    clima_mes = pd.DataFrame({"temp_media": c["tmedia"].resample("MS").mean(),
-                              "chuva": c["chuva"].resample("MS").sum()})
-    casos = (internacoes.set_index("data")[col(recorte, "arboviroses")]
-             .resample("MS").sum().rename("internacoes"))
-    mensal = casos.to_frame().join(clima_mes, how="left")
-    for k in range(1, max_meses + 1):
-        anterior = clima_mes.shift(k)
-        mensal[f"temp_media_{k}m"] = anterior["temp_media"].reindex(mensal.index)
-        mensal[f"chuva_{k}m"] = anterior["chuva"].reindex(mensal.index)
-    linhas = []
-    for k in range(max_meses + 1):
-        sufixo = "" if k == 0 else f"_{k}m"
-        for var, nome in (("temp_media", "Temperatura média"), ("chuva", "Chuva acumulada")):
-            d = mensal[["internacoes", var + sufixo]].dropna()
-            if len(d) > 3 and d["internacoes"].nunique() > 1:
-                rho, p = stats.spearmanr(d["internacoes"], d[var + sufixo])
-            else:
-                rho, p = np.nan, np.nan
-            linhas.append({"meses_antes": k, "variavel": nome, "rho": rho, "p_valor": p,
-                           "meses": len(d)})
-    return {"mensal": mensal.reset_index(names="mes"), "correlacao": pd.DataFrame(linhas)}
-
-
 # ------------------------------- 3. Heliópolis e região × cidade em dias de calor
 def _razao_de_razoes(a: pd.Series, b: pd.Series) -> dict:
     """O aumento de A é maior que o de B? (razão entre as duas razões, IC 95%)."""
@@ -370,7 +336,7 @@ def gerar_conclusoes(tab, grupo, criterio, limiar, faixas, corr, lags, comp) -> 
                       + ("Heliópolis interna mais, com ou sem calor. "
                          if h["taxa_normal"] > ci["taxa_normal"] else "")
                       + "Parte disso é porque quase todos em Heliópolis dependem do SUS, e o "
-                        "número depende da população usada (ajustável na barra lateral)."),
+                        "número depende da população usada."),
         })
 
     # 5. Se o calor não apareceu, explicar por quê

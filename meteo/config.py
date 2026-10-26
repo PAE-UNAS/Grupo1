@@ -41,23 +41,14 @@ RECORTES = {
 RAIZ = Path(__file__).resolve().parents[1]
 CACHE = RAIZ / "data" / "cache"
 SENSORES = RAIZ / "data" / "sensores"   # CSVs dos sensores da UNAS (quando houver)
+PROCESSADOS = RAIZ / "data" / "processed"
 
-# ------------------------------------------------------- sensores da UNAS
-# >>> PARA USAR OS DADOS REAIS: basta colocar os CSVs em data/sensores/.
-#     Os dados simulados abaixo deixam de ser usados automaticamente.
-#     Na versão final (sem nenhuma simulação), mude para False. <<<
-SENSORES_PLACEHOLDER = True
-# Sensores cujo nome começa com este prefixo contam como DENTRO de Heliópolis
-# (são os únicos usados para calibrar a Open-Meteo). Os demais são controle.
-PREFIXO_SENSOR_HELIOPOLIS = "heliopolis"
-# Só usado pela SIMULAÇÃO: quantos °C cada sensor fictício fica acima da
-# Open-Meteo (na hora mais quente, na madrugada). Valores INVENTADOS para
-# ilustrar; apague quando houver dados reais.
-PLACEHOLDER_EXCESSO = {
-    "heliopolis_viela_01": (2.5, 1.8),
-    "heliopolis_laje_02": (3.5, 1.2),
-    "ipiranga_controle_01": (0.4, 0.3),
-}
+# ------------------------------------------------- estações e sensores
+# CSVs dos sensores da UNAS em data/sensores/ (sensor_id, timestamp, temperatura,
+# umidade, unidade_temp). Sem eles, a aba de estresse térmico usa o INMET.
+ESTACOES_INMET = {"A701": "INMET Mirante de Santana (13 km)",
+                  "A771": "INMET Interlagos (15 km)"}
+PERIODO_HORARIO = ("2025-12-01", "2026-03-31")   # verão 2025/26
 
 # -------------------------------------------------------------------- clima
 CLIMATOLOGIA = (1991, 2020)  # período de referência para definir "calor" (padrão da OMM)

@@ -7,3 +7,6 @@ data/cache/*
 # Para versioná-los, apague as duas linhas abaixo.
 data/sensores/*
 !data/sensores/.gitkeep
+.env
+data/raw/
+data/processed/
