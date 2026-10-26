@@ -12,8 +12,10 @@ from meteo import censo, clima, config, cruzamento, estacoes, poluicao, saude
 # Cor = identidade do lugar (a mesma em todos os gráficos)
 COR = {"heliopolis": "#eb6834", "regiao": "#1baf7a", "cidade": "#2a78d6"}
 CINZA, TINTA = "#a3a29c", "#52514e"
-# Sem botão de baixar imagem
-CONFIG_GRAFICO = {"displaylogo": False, "modeBarButtonsToRemove": ["toImage"]}
+# Só o botão "baixar como imagem" (PNG em alta resolução), que aparece ao passar o mouse
+CONFIG_GRAFICO = {"modeBarButtons": [["toImage"]], "displaylogo": False,
+                  "toImageButtonOptions": {"format": "png", "scale": 2,
+                                           "filename": "calor_heliopolis"}}
 MESES = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 CORES_ESTACAO = ["#6250d6", "#e87ba4", "#008300", "#eda100", "#e34948", "#1baf7a"]
 CORES_RISCO = {"Sem alerta": "#d6d5cf", "Atenção": "#f5c46b", "Cautela extrema": "#eb6834",
@@ -67,6 +69,11 @@ def grafico(fig, altura=380):
 def mostrar(fig, altura=380, legenda=True):
     st.plotly_chart(grafico(fig, altura).update_layout(showlegend=legenda), width="stretch",
                     config=CONFIG_GRAFICO)
+
+
+def csv(df, **kw):
+    """CSV no padrão do Excel brasileiro (; e vírgula decimal)."""
+    return df.to_csv(sep=";", decimal=",", **kw).encode("utf-8-sig")
 
 
 def correlacoes(tabela, nomes):
@@ -266,6 +273,8 @@ with aba_clima:
     st.caption("Fonte: Open-Meteo (reanálise ERA5) para o ponto central de Heliópolis. É uma "
                "estimativa para uma área de vários km²; dentro da favela, com casas coladas, laje e "
                "pouca árvore, o calor costuma ser maior.")
+    st.download_button("Baixar série de clima desde 1991 (.csv)", csv(cl, index=False),
+                       "clima_heliopolis_diario.csv")
 
 # ============================================================ 2. saúde
 with aba_saude:
@@ -436,6 +445,9 @@ with aba_saude:
                    "Heliópolis quase todos dependem do SUS, na cidade muitos têm plano de saúde. Por "
                    "isso a comparação de cada lugar consigo mesmo (gráfico da esquerda) é a mais "
                    "justa para medir o efeito do calor.")
+        cols = ["data", "tmax", "tmin", "sensacao_max", "chuva", "dia_calor", "janela_calor"] +                [x for x in tab.columns if x.count("__") == 1]
+        st.download_button("Baixar tabela diária clima × internações (.csv)",
+                           csv(tab[cols], index=False), "calor_internacoes_diario.csv")
 
 # ============================================================ 3. estresse térmico
 with aba_estresse:
@@ -574,6 +586,8 @@ with aba_estresse:
         st.caption("Estações automáticas do INMET a 13 e 15 km de Heliópolis. Dentro da favela o "
                    "calor tende a ser maior. Quando houver sensores da UNAS em `data/sensores/`, "
                    "eles entram no lugar do INMET.")
+        st.download_button("Baixar medições horárias com os índices (.csv)",
+                           csv(df_h, index=False), "estresse_termico_horario.csv")
 
 # ============================================================ 4. população
 with aba_pop:
@@ -614,3 +628,7 @@ with aba_pop:
                      use_container_width=True)
         st.caption(f"IBGE, Censo 2022: {h['setores']:.0f} setores da favela de Heliópolis. "
                    "A estimativa de ~200 mil da UNAS inclui o entorno.")
+        st.download_button("Baixar dados do Censo (.csv)", csv(pop), "censo_heliopolis.csv")
+
+st.caption("Para salvar um gráfico como imagem, passe o mouse sobre ele e clique no ícone de "
+           "câmera no canto superior direito.")
