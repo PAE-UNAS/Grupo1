@@ -27,10 +27,12 @@ streamlit run app.py
 Testes: `python -m pytest`. ETL sem o painel: `python -m meteo.pipeline`.
 
 ## Abas do painel
-- **Estresse térmico**: índice de calor, WBGT e faixas de risco hora a hora (INMET), com poluição.
+Filtros na barra lateral: critério de calor, tipo de internação, anos, população, feriados,
+período e local de medição.
 - **O calor está aumentando?**: dias de calor por ano desde 1991 (Open-Meteo).
+- **Calor × internações**: internações de urgência em Heliópolis, região do Ipiranga e cidade.
+- **Estresse térmico**: índice de calor, WBGT e faixas de risco hora a hora (INMET), com poluição.
 - **População exposta**: moradores, densidade e idade (Censo 2022).
-- **Calor e internações**: internações de urgência em Heliópolis, região do Ipiranga e cidade.
 
 ## Dados e métodos
 
