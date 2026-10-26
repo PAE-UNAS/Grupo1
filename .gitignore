@@ -1,6 +1,12 @@
-__pycache__/
-*.pyc
 .venv/
+__pycache__/
+.pytest_cache/
+data/cache/*
+!data/cache/.gitkeep
+# Dados dos sensores ficam fora do Git por padrão (podem ser dados da comunidade).
+# Para versioná-los, apague as duas linhas abaixo.
+data/sensores/*
+!data/sensores/.gitkeep
 .env
 data/raw/
 data/processed/
