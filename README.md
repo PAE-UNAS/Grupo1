@@ -34,6 +34,9 @@ período e local de medição.
 - **Estresse térmico**: índice de calor, WBGT e faixas de risco hora a hora (INMET), com poluição.
 - **População exposta**: moradores, densidade e idade (Censo 2022).
 
+Cada aba tem botão para baixar os dados em CSV (; e vírgula decimal). Os gráficos
+salvam como PNG pelo ícone de câmera.
+
 ## Dados e métodos
 
 ### Fontes
